@@ -20,7 +20,10 @@
     ],
     "baseUrl": ".",
     "paths": {
-      "@/*": ["./*"]
+      "@/*": ["./*"],
+
+      "wa-sqlite": ["./wa-sqlite/src/sqlite-api.js"],
+      "wa-sqlite/*": ["./wa-sqlite/*"]
     }
   },
   "include": [
