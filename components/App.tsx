@@ -7,12 +7,10 @@ export default function App() {
   return (
     <DatabaseProvider>
       <main className="h-svh overflow-hidden bg-background">
-        <div className="mx-auto flex h-full max-w-[1400px] flex-col">
-          <div className="grid min-h-0 flex-1 grid-cols-1 gap-5 p-8 lg:grid-cols-[minmax(0,1fr)_420px]">
-            <BookSearch />
-            <StatsPanel />
-          </div>
+        <div className="mx-auto flex h-full max-w-3xl flex-col p-5 sm:p-8 lg:mr-[22rem]">
+          <BookSearch />
         </div>
+        <StatsPanel />
       </main>
     </DatabaseProvider>
   )

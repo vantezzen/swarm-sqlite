@@ -36,7 +36,7 @@ export abstract class Filesystem {
    * Emscripten module set by wa-sqlite when registering this VFS.
    * Needed for pointer-based methods such as `xFullPathname`.
    */
-  protected _module?: WasmModuleLike
+  protected module?: WasmModuleLike
 
   readonly mxPathname = 64
 
@@ -48,7 +48,7 @@ export abstract class Filesystem {
 
   constructor(name: string, module?: WasmModuleLike) {
     this.name = name
-    this._module = module
+    this.module = module
     this.transferStats = new TransferStats(this.events)
   }
 
@@ -188,27 +188,34 @@ export abstract class Filesystem {
     iOffsetLo?: number,
     iOffsetHi?: number
   ): Promise<SqliteResultCode> {
-    const dataView =
-      typeof pData === "number" ? this.#ptrToBytes(pData, iAmtOrOffset) : pData
-    const offset =
-      typeof pData === "number"
-        ? this.#fromInt64Parts(iOffsetLo ?? 0, iOffsetHi ?? 0)
-        : iAmtOrOffset
+    const isPointerStyle = typeof pData === "number"
+    const length = isPointerStyle ? iAmtOrOffset : pData.byteLength
+    const offset = isPointerStyle
+      ? this.#fromInt64Parts(iOffsetLo ?? 0, iOffsetHi ?? 0)
+      : iAmtOrOffset
 
-    debug(`🗄️ Filesystem::xRead`, {
-      fileId,
-      iOffset: offset,
-      length: dataView.byteLength,
-    })
+    debug(`🗄️ Filesystem::xRead`, { fileId, iOffset: offset, length })
     const filename = this.filenameOf(fileId)
-    const bytesRead = await this.read(filename, dataView, offset)
-    this.events.emit("read", filename, bytesRead, offset)
 
-    if (bytesRead < dataView.byteLength) {
-      dataView.fill(0, bytesRead)
-      return VFS.SQLITE_IOERR_SHORT_READ
+    let bytesRead: number
+
+    if (isPointerStyle) {
+      // WASM memory can grow during the async read (Asyncify stack
+      // save / SQLite page-cache malloc), which replaces HEAPU8 and
+      // invalidates any existing subarray view. Read into a temporary
+      // buffer, then copy to a fresh view after the await.
+      const tmp = new Uint8Array(length)
+      bytesRead = await this.read(filename, tmp, offset)
+      const dst = this.#ptrToBytes(pData as number, length)
+      dst.set(tmp.subarray(0, bytesRead))
+      if (bytesRead < length) dst.fill(0, bytesRead)
+    } else {
+      bytesRead = await this.read(filename, pData, offset)
+      if (bytesRead < length) pData.fill(0, bytesRead)
     }
-    return VFS.SQLITE_OK
+
+    this.events.emit("read", filename, bytesRead, offset)
+    return bytesRead < length ? VFS.SQLITE_IOERR_SHORT_READ : VFS.SQLITE_OK
   }
 
   async xWrite(
@@ -218,12 +225,15 @@ export abstract class Filesystem {
     iOffsetLo?: number,
     iOffsetHi?: number
   ): Promise<SqliteResultCode> {
-    const dataView =
-      typeof pData === "number" ? this.#ptrToBytes(pData, iAmtOrOffset) : pData
-    const offset =
-      typeof pData === "number"
-        ? this.#fromInt64Parts(iOffsetLo ?? 0, iOffsetHi ?? 0)
-        : iAmtOrOffset
+    const isPointerStyle = typeof pData === "number"
+    // For pointer-style calls, snapshot the data before the async write
+    // so a WASM memory growth can't invalidate the view mid-operation.
+    const dataView = isPointerStyle
+      ? this.#ptrToBytes(pData, iAmtOrOffset).slice()
+      : pData
+    const offset = isPointerStyle
+      ? this.#fromInt64Parts(iOffsetLo ?? 0, iOffsetHi ?? 0)
+      : iAmtOrOffset
 
     debug(`🗄️ Filesystem::xWrite`, {
       fileId,
@@ -319,7 +329,7 @@ export abstract class Filesystem {
   ): SqliteResultCode {
     debug(`🗄️ Filesystem::xFullPathname`, { pVfs, zName, nOut, zOut })
 
-    const wasmModule = this._module
+    const wasmModule = this.module
     if (!wasmModule) {
       console.error(
         "🗄️ Filesystem::xFullPathname failed: no wasm module available"
@@ -424,7 +434,7 @@ export abstract class Filesystem {
     if (typeof value === "string" || value === null) {
       return value
     }
-    const wasmModule = this._module
+    const wasmModule = this.module
     if (!wasmModule) {
       return null
     }
@@ -432,13 +442,13 @@ export abstract class Filesystem {
   }
 
   #ptrToBytes(ptr: number, length: number): Uint8Array {
-    const wasmModule = this._mustGetModule()
+    const wasmModule = this.mustGetModule()
     return wasmModule.HEAPU8.subarray(ptr, ptr + length)
   }
 
   #setInt32(target: number | DataView, value: number): void {
     if (typeof target === "number") {
-      const wasmModule = this._mustGetModule()
+      const wasmModule = this.mustGetModule()
       new DataView(wasmModule.HEAPU8.buffer).setInt32(target, value, true)
       return
     }
@@ -447,7 +457,7 @@ export abstract class Filesystem {
 
   #setBigInt64(target: number | DataView, value: bigint): void {
     if (typeof target === "number") {
-      const wasmModule = this._mustGetModule()
+      const wasmModule = this.mustGetModule()
       new DataView(wasmModule.HEAPU8.buffer).setBigInt64(target, value, true)
       return
     }
@@ -458,8 +468,8 @@ export abstract class Filesystem {
     return (lo >>> 0) + (hi >>> 0) * UINT32_RANGE
   }
 
-  _mustGetModule(): WasmModuleLike {
-    const wasmModule = this._module
+  mustGetModule(): WasmModuleLike {
+    const wasmModule = this.module
     if (!wasmModule) {
       throw new Error("Filesystem: wasm module is not available")
     }

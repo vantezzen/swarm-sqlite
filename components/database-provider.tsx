@@ -62,12 +62,11 @@ export function DatabaseProvider({ children }: { children: React.ReactNode }) {
   if (!instance) {
     return (
       <div className="flex min-h-svh items-center justify-center text-sm text-muted-foreground">
-        <div className="flex items-center gap-3">
-          <span className="relative flex h-2 w-2">
-            <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-primary opacity-75"></span>
-            <span className="relative inline-flex h-2 w-2 rounded-full bg-primary"></span>
-          </span>
-          Loading database…
+        <div className="flex flex-col items-center gap-3">
+          <div className="h-3 w-64 rounded-md bg-zinc-300">
+            <div className="h-full w-full animate-peer-loading rounded-md bg-blue-600"></div>
+          </div>
+          Searching peers…
         </div>
       </div>
     )

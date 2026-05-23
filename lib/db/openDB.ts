@@ -1,9 +1,8 @@
 import SQLiteESMFactory from "wa-sqlite/dist/wa-sqlite-async.mjs"
 import * as SQLite from "wa-sqlite"
-import { HttpFS } from "./HttpFS"
 import SwarmFS from "./SwarmFS"
 
-export async function openDB() {
+export async function openDB(filename = "books.sqlite") {
   const sqliteModule = await SQLiteESMFactory()
   const sqlite3 = SQLite.Factory(sqliteModule)
 
@@ -11,7 +10,7 @@ export async function openDB() {
   sqlite3.vfs_register(vfs as unknown as SQLiteVFS, true)
 
   const openFlags = SQLite.SQLITE_OPEN_READONLY | SQLite.SQLITE_OPEN_URI
-  const dbUri = "file:books.sqlite?mode=ro&immutable=1"
+  const dbUri = `file:${filename}?mode=ro&immutable=1`
   const dbHandle = await sqlite3.open_v2(dbUri, openFlags, "swarmfs")
   await sqlite3.exec(dbHandle, "PRAGMA query_only = ON;")
   await sqlite3.exec(dbHandle, "PRAGMA journal_mode = OFF;")

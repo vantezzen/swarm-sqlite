@@ -2,42 +2,44 @@ import { FETCH_BLOCK_SIZE, SQLITE_BLOCK_SIZE } from "../const"
 import { MerkleTree } from "../data/MerkleTree"
 import Connection from "../p2p/Connection"
 import { alignToBlockSize } from "../utils"
-import { MaybePromise } from "./Filesystem"
 import { HttpFS } from "./HttpFS"
 import debugging from "debug"
 import "scheduler-polyfill"
 
 const debug = debugging("swarm-sqlite:SwarmFS")
 
+interface FileState {
+  connection: Connection
+  merkleTree: MerkleTree
+  proofDepth: number
+}
+
 export default class SwarmFS extends HttpFS {
-  // filename -> instance
-  private connections = new Map<string, Connection>()
-  private merkleTrees = new Map<string, MerkleTree>()
-  private proofDepths = new Map<string, number>()
+  private readonly openFiles = new Map<string, FileState>()
   private lastYield = 0
+  private readonly hashBuffer = new Uint8Array(FETCH_BLOCK_SIZE)
 
   protected async open(filename: string): Promise<void> {
     debug(`SwarmFS::open`, { filename })
+    if (this.openFiles.has(filename)) return
 
-    if (!this.connections.has(filename)) {
-      debug(`Creating new Connection for ${filename}`)
+    const { rootHash, blockCount, proofDepth } =
+      await this.getRootFileInfo(filename)
+    const merkleTree = new MerkleTree(blockCount, rootHash)
+    const connection = new Connection(
+      filename,
+      this.cache,
+      this.events,
+      merkleTree
+    )
+    this.openFiles.set(filename, { connection, merkleTree, proofDepth })
+    await connection.waitForPeer()
+  }
 
-      // Download roothash
-      const { rootHash, blockCount, proofDepth } =
-        await this.getRootFileInfo(filename)
-      const merkleTree = new MerkleTree(blockCount, rootHash)
-      this.merkleTrees.set(filename, merkleTree)
-      this.proofDepths.set(filename, proofDepth)
-
-      // Set up P2P connection
-      const connection = new Connection(
-        filename,
-        this.cache,
-        this.events,
-        merkleTree
-      )
-      this.connections.set(filename, connection)
-    }
+  private getFile(filename: string): FileState {
+    const file = this.openFiles.get(filename)
+    if (!file) throw new Error(`SwarmFS: file "${filename}" not opened`)
+    return file
   }
 
   private async getRootFileInfo(filename: string): Promise<{
@@ -66,12 +68,7 @@ export default class SwarmFS extends HttpFS {
   ): Promise<number> {
     debug(`SwarmFS::read`, { filename, offset, length: dst.byteLength })
 
-    const now = performance.now()
-    if (now - this.lastYield > 100) {
-      // Keeps the page responsive by yielding to the event loop before doing potentially expensive work.
-      await scheduler.yield()
-      this.lastYield = now
-    }
+    await this.yieldIfNeeded()
 
     if (this.cache.has(filename, offset, dst.byteLength)) {
       debug(`SwarmFS::read -> Cache hit`, {
@@ -84,7 +81,7 @@ export default class SwarmFS extends HttpFS {
       return cached
     }
 
-    const connection = this.connections.get(filename)!
+    const { connection } = this.getFile(filename)
 
     if (connection.hasPeers()) {
       try {
@@ -96,33 +93,51 @@ export default class SwarmFS extends HttpFS {
           length: dst.byteLength,
           error: err instanceof Error ? err.message : err,
         })
+        this.events.emit("peer-fetch-fail", filename, offset)
       }
     }
 
     const readBytes = await super.read(filename, dst, offset)
-    debug(`SwarmFS::read -> got data from HTTP`, {
-      filename,
-      offset,
-      length: dst.byteLength,
-    })
-
-    await this.addProofForHttpData(offset, filename)
-
+    // Proof ingestion is best-effort — the HTTP data in dst is already correct.
+    // A failure here (e.g. mismatched proof file) must not crash the read.
+    try {
+      await this.addProofForHttpData(filename, offset)
+    } catch (err) {
+      debug(`Failed to ingest proof for block at offset ${offset}`, {
+        filename,
+        error: err instanceof Error ? err.message : err,
+      })
+    }
     return readBytes
   }
 
-  private async addProofForHttpData(offset: number, filename: string) {
-    const blockIndex = Math.floor(offset / FETCH_BLOCK_SIZE)
-    const proof = await this.getProofFromServer(filename, blockIndex)
-    const merkleTree = this.merkleTrees.get(filename)!
+  private async yieldIfNeeded() {
+    const now = performance.now()
+    if (now - this.lastYield > 100) {
+      await scheduler.yield()
+      this.lastYield = now
+    }
+  }
 
-    // Hash the full FETCH_BLOCK_SIZE block from cache, not just the small
-    // SQLite page in dst — merkle leaves are computed over whole blocks.
+  private async addProofForHttpData(filename: string, offset: number) {
+    const { merkleTree, proofDepth } = this.getFile(filename)
+    const blockIndex = Math.floor(offset / FETCH_BLOCK_SIZE)
+    const proof = await this.getProofFromServer(
+      filename,
+      blockIndex,
+      proofDepth
+    )
+
     const blockStart = blockIndex * FETCH_BLOCK_SIZE
-    const fullBlock = new Uint8Array(FETCH_BLOCK_SIZE)
-    const blockBytes = this.cache.read(filename, fullBlock, blockStart) ?? 0
-    const blockHash = await merkleTree.hash(fullBlock.subarray(0, blockBytes))
-    merkleTree.insert(blockHash, blockIndex, proof)
+    // allowPartial: the last block of a file is shorter than FETCH_BLOCK_SIZE,
+    // so not all 4 KiB slots in the 1 MiB range will be cached.
+    const blockBytes =
+      this.cache.read(filename, this.hashBuffer, blockStart, true) ?? 0
+    await merkleTree.verifyAndAddData(
+      this.hashBuffer.subarray(0, blockBytes),
+      blockIndex,
+      proof
+    )
   }
 
   protected async readFromPeers(
@@ -130,62 +145,59 @@ export default class SwarmFS extends HttpFS {
     dst: Uint8Array,
     offset: number
   ): Promise<number> {
-    const connection = this.connections.get(filename)!
+    const { connection, merkleTree } = this.getFile(filename)
     const [fetchBlockStart, _, blockIndex] = alignToBlockSize(
       offset,
       FETCH_BLOCK_SIZE
     )
 
     const data = await connection.getData(fetchBlockStart, FETCH_BLOCK_SIZE)
-    if (data) {
-      this.merkleTrees
-        .get(filename)!
-        .verifyAndAddData(data.value, blockIndex, data.proof)
-
-      this.cache.put(filename, fetchBlockStart, data.value)
-      const offsetWithinBlock = offset - fetchBlockStart
-      dst.set(
-        data.value.subarray(
-          offsetWithinBlock,
-          offsetWithinBlock + dst.byteLength
-        )
+    if (!data) {
+      throw new Error(
+        `Failed to read data from peers for ${filename} at offset ${offset}`
       )
-
-      const newBytes =
-        this.cache.missingBlocks(
-          filename,
-          fetchBlockStart,
-          data.value.byteLength
-        ).length * SQLITE_BLOCK_SIZE
-      debug(`SwarmFS::read -> got data from peer`, {
-        filename,
-        offset,
-        length: data.value.byteLength,
-        newBytes,
-      })
-      this.events.emit(
-        "peer-fetch",
-        filename,
-        data.value.byteLength,
-        newBytes,
-        offset,
-        data.time
-      )
-      return dst.byteLength
     }
 
-    throw new Error(
-      `Failed to read data from peers for ${filename} at offset ${offset}`
+    await merkleTree.verifyAndAddData(data.value, blockIndex, data.proof)
+
+    // Capture new-byte count before caching (missingBlocks returns 0 after put)
+    const newBytes =
+      this.cache.missingBlocks(filename, fetchBlockStart, data.value.byteLength)
+        .length * SQLITE_BLOCK_SIZE
+
+    this.cache.put(filename, fetchBlockStart, data.value)
+
+    const offsetWithinBlock = offset - fetchBlockStart
+    dst.set(
+      data.value.subarray(offsetWithinBlock, offsetWithinBlock + dst.byteLength)
     )
+
+    debug(`SwarmFS::read -> got data from peer`, {
+      filename,
+      offset,
+      length: data.value.byteLength,
+      newBytes,
+    })
+    this.events.emit(
+      "peer-fetch",
+      filename,
+      data.value.byteLength,
+      newBytes,
+      offset,
+      data.time
+    )
+    return dst.byteLength
   }
 
-  protected async getProofFromServer(filename: string, blockIndex: number) {
+  private async getProofFromServer(
+    filename: string,
+    blockIndex: number,
+    proofDepth: number
+  ) {
     const proofUrl = `${filename}.proof`
     debug(`Fetching proof from ${proofUrl} for block index ${blockIndex}`)
 
-    const proofDepth = this.proofDepths.get(filename)!
-    const proofSize = proofDepth * 32 // Each hash is 32 bytes
-
+    const proofSize = proofDepth * 32
     const proofStart = 8 + blockIndex * proofSize
     const proofEnd = proofStart + proofSize - 1
 
@@ -202,11 +214,11 @@ export default class SwarmFS extends HttpFS {
     }
 
     const proofData = await response.arrayBuffer()
-
     const proofs: Uint8Array[] = []
     for (let i = 0; i < proofData.byteLength; i += 32) {
-      proofs.push(new Uint8Array(proofData, i, 32))
+      proofs.push(new Uint8Array(proofData.slice(i, i + 32)))
     }
+
     debug(`Fetched proof for block index ${blockIndex}`, {
       filename,
       blockIndex,

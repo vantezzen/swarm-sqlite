@@ -1,3 +1,27 @@
+function concatBytes(a: Uint8Array, b: Uint8Array): Uint8Array {
+  const result = new Uint8Array(a.length + b.length)
+  result.set(a, 0)
+  result.set(b, a.length)
+  return result
+}
+
+function equalBytes(a: Uint8Array, b: Uint8Array): boolean {
+  if (a.length !== b.length) return false
+  for (let i = 0; i < a.length; i++) {
+    if (a[i] !== b[i]) return false
+  }
+  return true
+}
+
+async function sha256(data: Uint8Array): Promise<Uint8Array> {
+  // Slice to an owned ArrayBuffer so subarrays hash only their portion
+  const buffer = data.buffer.slice(
+    data.byteOffset,
+    data.byteOffset + data.byteLength
+  ) as ArrayBuffer
+  return new Uint8Array(await crypto.subtle.digest("SHA-256", buffer))
+}
+
 export class MerkleTree {
   /** Number of leaf nodes (blocks) */
   readonly blockCount: number
@@ -38,27 +62,6 @@ export class MerkleTree {
     this.tree[this.depth - 1].set(0, rootHash)
   }
 
-  async hash(data: Uint8Array): Promise<Uint8Array> {
-    const hashBuffer = await crypto.subtle.digest(
-      "SHA-256",
-      data.buffer as ArrayBuffer
-    )
-    return new Uint8Array(hashBuffer)
-  }
-  private concat(a: Uint8Array, b: Uint8Array): Uint8Array {
-    const result = new Uint8Array(a.length + b.length)
-    result.set(a, 0)
-    result.set(b, a.length)
-    return result
-  }
-  private equals(a: Uint8Array, b: Uint8Array): boolean {
-    if (a.length !== b.length) return false
-    for (let i = 0; i < a.length; i++) {
-      if (a[i] !== b[i]) return false
-    }
-    return true
-  }
-
   private getSiblingIndex(index: number): number {
     return index % 2 === 0 ? index + 1 : index - 1
   }
@@ -78,7 +81,7 @@ export class MerkleTree {
   /**
    * Verify a block against the trusted root hash
    *
-   * @param blockData - Raw block data to verify
+   * @param blockHash - SHA-256 hash of the block data
    * @param blockIndex - Index of the block (0-based)
    * @param proofs - Array of sibling hashes from leaf to root
    * @returns true if verification succeeds
@@ -101,46 +104,35 @@ export class MerkleTree {
       )
     }
 
-    // Start with hash of block data
     let currentHash = blockHash
     let currentIndex = blockIndex
 
-    // Walk up the tree
     for (let level = 0; level < this.depth - 1; level++) {
       const sibling = proofs[level]
-      const isLeft = currentIndex % 2 === 0
 
-      // Handle odd-length levels: last node hashes with itself
       const isLastNode = this.isLastAtLevel(level, currentIndex)
       const siblingIndex = this.getSiblingIndex(currentIndex)
       const siblingExists = siblingIndex < this.getLevelSize(level)
 
       let combined: Uint8Array
       if (isLastNode && !siblingExists) {
-        // No sibling exists, hash with self
-        combined = this.concat(currentHash, currentHash)
-      } else if (isLeft) {
-        combined = this.concat(currentHash, sibling)
+        combined = concatBytes(currentHash, currentHash)
+      } else if (currentIndex % 2 === 0) {
+        combined = concatBytes(currentHash, sibling)
       } else {
-        combined = this.concat(sibling, currentHash)
+        combined = concatBytes(sibling, currentHash)
       }
 
-      currentHash = await this.hash(combined)
+      currentHash = await sha256(combined)
       currentIndex = this.getParentIndex(currentIndex)
     }
 
-    // Compare with trusted root
-    return this.equals(currentHash, this.rootHash)
+    return equalBytes(currentHash, this.rootHash)
   }
 
   /**
-   * Insert a block hash and its proofs into the tree
-   *
-   * This fills in the sparse tree structure for future proof generation
-   *
-   * @param blockHash - Hash of the block data (not the raw data)
-   * @param blockIndex - Index of the block (0-based)
-   * @param proofs - Array of sibling hashes from leaf to root
+   * Insert a block hash and its proofs into the tree.
+   * Fills in the sparse tree structure for future proof generation.
    */
   insert(
     blockHash: Uint8Array,
@@ -164,12 +156,9 @@ export class MerkleTree {
       )
     }
 
-    // Insert the leaf hash
     this.tree[0].set(blockIndex, blockHash)
 
-    // Insert all proof hashes at their correct positions
     let currentIndex = blockIndex
-
     for (let level = 0; level < this.depth - 1; level++) {
       const siblingIndex = this.getSiblingIndex(currentIndex)
       const siblingExists = siblingIndex < this.getLevelSize(level)
@@ -187,12 +176,8 @@ export class MerkleTree {
   }
 
   /**
-   * Get proofs needed to verify a block
-   *
-   * Returns null if we don't have all required sibling hashes
-   *
-   * @param blockIndex - Index of the block (0-based)
-   * @returns Array of sibling hashes, or null if incomplete
+   * Get proofs needed to verify a block.
+   * Returns null if we don't have all required sibling hashes.
    */
   getProofs(blockIndex: number): Uint8Array[] | null {
     if (blockIndex < 0 || blockIndex >= this.blockCount) {
@@ -210,17 +195,11 @@ export class MerkleTree {
 
       if (siblingExists) {
         const sibling = this.tree[level].get(siblingIndex)
-        if (!sibling) {
-          // We don't have this sibling hash yet
-          return null
-        }
+        if (!sibling) return null
         proofs.push(sibling)
       } else {
-        // No sibling at this position (odd level), use the node itself
         const self = this.tree[level].get(currentIndex)
-        if (!self) {
-          return null
-        }
+        if (!self) return null
         proofs.push(self)
       }
 
@@ -230,23 +209,14 @@ export class MerkleTree {
     return proofs
   }
 
-  /**
-   * Check if we have the hash for a specific block
-   */
   hasBlock(blockIndex: number): boolean {
     return this.tree[0].has(blockIndex)
   }
 
-  /**
-   * Get the hash for a specific block (if known)
-   */
   getBlockHash(blockIndex: number): Uint8Array | null {
     return this.tree[0].get(blockIndex) ?? null
   }
 
-  /**
-   * Get statistics about the tree's completeness
-   */
   getStats(): {
     knownBlocks: number
     totalBlocks: number
@@ -265,18 +235,31 @@ export class MerkleTree {
   }
 
   /**
-   * Serialize the known tree state for persistence
+   * Verify block data against the trusted root hash and, if valid,
+   * insert the block hash and proofs into the tree.
    */
+  async verifyAndAddData(
+    blockData: Uint8Array,
+    blockIndex: number,
+    proofs: Uint8Array[]
+  ): Promise<void> {
+    const blockHash = await sha256(blockData)
+    const isValid = await this.verify(blockHash, blockIndex, proofs)
+
+    if (!isValid) {
+      throw new Error(`Data verification failed for block ${blockIndex}`)
+    }
+
+    this.insert(blockHash, blockIndex, proofs)
+  }
+
   serialize(): ArrayBuffer {
-    // Count total known nodes
     let totalNodes = 0
     for (const level of this.tree) {
       totalNodes += level.size
     }
 
-    // Header: blockCount (4) + depth (2) + rootHash (32) + totalNodes (4)
     const headerSize = 42
-    // Each node: level (1) + index (4) + hash (32) = 37 bytes
     const nodeSize = 37
     const bufferSize = headerSize + totalNodes * nodeSize
 
@@ -284,13 +267,11 @@ export class MerkleTree {
     const view = new DataView(buffer)
     const bytes = new Uint8Array(buffer)
 
-    // Write header
     view.setUint32(0, this.blockCount, true)
     view.setUint16(4, this.depth, true)
     bytes.set(this.rootHash, 6)
     view.setUint32(38, totalNodes, true)
 
-    // Write nodes
     let offset = headerSize
     for (let level = 0; level < this.tree.length; level++) {
       for (const [index, hash] of this.tree[level]) {
@@ -304,28 +285,20 @@ export class MerkleTree {
     return buffer
   }
 
-  /**
-   * Deserialize a previously saved tree state
-   */
   static deserialize(buffer: ArrayBuffer): MerkleTree {
     const view = new DataView(buffer)
     const bytes = new Uint8Array(buffer)
 
-    // Read header
     const blockCount = view.getUint32(0, true)
     const depth = view.getUint16(4, true)
     const rootHash = bytes.slice(6, 38)
     const totalNodes = view.getUint32(38, true)
 
-    // Create tree
     const tree = new MerkleTree(blockCount, rootHash)
-
-    // Verify depth matches
     if (tree.depth !== depth) {
       throw new Error("Deserialized depth does not match computed depth")
     }
 
-    // Read nodes
     const headerSize = 42
     const nodeSize = 37
     let offset = headerSize
@@ -335,7 +308,6 @@ export class MerkleTree {
       const index = view.getUint32(offset + 1, true)
       const hash = bytes.slice(offset + 5, offset + 37)
 
-      // Don't overwrite the root
       if (level < tree.depth - 1 || index !== 0) {
         tree.tree[level].set(index, hash)
       }
@@ -344,20 +316,5 @@ export class MerkleTree {
     }
 
     return tree
-  }
-
-  async verifyAndAddData(
-    blockData: Uint8Array,
-    blockIndex: number,
-    proofs: Uint8Array[]
-  ): Promise<void> {
-    const blockHash = await this.hash(blockData)
-    const isValid = await this.verify(blockHash, blockIndex, proofs)
-
-    if (!isValid) {
-      throw new Error(`Data verification failed for block ${blockIndex}`)
-    }
-
-    this.insert(blockHash, blockIndex, proofs)
   }
 }

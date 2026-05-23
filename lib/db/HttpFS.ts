@@ -10,6 +10,11 @@ export class HttpFS extends Filesystem {
   readonly SIDECAR_SUFFIXES = ["-journal", "-wal", "-shm"]
   protected cache = new FileContentCache()
 
+  constructor(...args: ConstructorParameters<typeof Filesystem>) {
+    super(...args)
+    this.transferStats.setCache(this.cache)
+  }
+
   protected create(_filename: string): void {
     throw new Error("HttpFS is readonly")
   }
@@ -58,6 +63,7 @@ export class HttpFS extends Filesystem {
 
     const [fetchStart, fetchEnd] = alignToBlockSize(start, FETCH_BLOCK_SIZE)
 
+    const t0 = performance.now()
     const response = await fetch(filename, {
       headers: {
         Range: `bytes=${fetchStart}-${fetchEnd}`,
@@ -66,6 +72,7 @@ export class HttpFS extends Filesystem {
 
     const data = await response.arrayBuffer()
     const src = new Uint8Array(data)
+    const duration = performance.now() - t0
 
     debug("read -> Result", {
       status: response.status,
@@ -79,7 +86,7 @@ export class HttpFS extends Filesystem {
       this.cache.missingBlocks(filename, fetchStart, src.byteLength).length *
       SQLITE_BLOCK_SIZE
     this.cache.put(filename, fetchStart, src)
-    this.events.emit("http-fetch", filename, newBytes, fetchStart)
+    this.events.emit("http-fetch", filename, newBytes, fetchStart, duration)
     return this.cache.read(filename, dst, start) ?? 0
   }
 
