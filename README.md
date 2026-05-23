@@ -20,6 +20,12 @@ The server hosts three files per database:
 | `db.sqlite.info.json` | `{ rootHash, blockCount, proofDepth }` |
 | `db.sqlite.proof` | Binary proof file (see below) |
 
+### Info file
+
+The `db.sqlite.info.json` file contains metadata about the database, including the root hash, block count and proof depth for the merkle tree and the filesize of the DB.
+
+Originally I used a simple `HEAD` request to get the file size but on CDNs this often returns the compressed size of the file - which creates issues inside SQLite.
+
 ### Proof file layout
 
 The `.proof` file is a flat binary file designed for partial fetching via HTTP `Range` requests -- the client only needs the proof for the block it's verifying, not the entire file.

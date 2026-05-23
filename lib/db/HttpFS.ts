@@ -9,6 +9,7 @@ const debug = debugging("swarm-sqlite:HttpFS")
 export class HttpFS extends Filesystem {
   readonly SIDECAR_SUFFIXES = ["-journal", "-wal", "-shm"]
   protected cache = new FileContentCache()
+  protected fileSizes = new Map<string, number>()
 
   constructor(...args: ConstructorParameters<typeof Filesystem>) {
     super(...args)
@@ -99,13 +100,12 @@ export class HttpFS extends Filesystem {
   }
 
   protected async size(filename: string): Promise<number> {
-    const response = await fetch(filename, {
-      method: "HEAD",
-    })
-    const filesize = Number(response.headers.get("content-length") ?? 0)
+    const filesize = this.fileSizes.get(filename)
+    if (filesize === undefined) {
+      throw new Error(`Missing file size metadata for ${filename}`)
+    }
 
     debug(`size`, { filename, filesize })
-
     return filesize
   }
 }

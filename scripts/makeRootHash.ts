@@ -88,7 +88,11 @@ async function main() {
   // Save root hash
   await Bun.write(
     filePath + ".info.json",
-    JSON.stringify({ rootHash: rootHashHex, blockCount, proofDepth }, null, 2)
+    JSON.stringify(
+      { rootHash: rootHashHex, blockCount, proofDepth, fileSize: data.length },
+      null,
+      2
+    )
   )
   console.log(`Saved: ${filePath}.info.json`)
 

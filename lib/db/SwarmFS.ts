@@ -14,6 +14,13 @@ interface FileState {
   proofDepth: number
 }
 
+interface RootFileInfo {
+  rootHash: Uint8Array
+  blockCount: number
+  proofDepth: number
+  fileSize: number
+}
+
 export default class SwarmFS extends HttpFS {
   private readonly openFiles = new Map<string, FileState>()
   private lastYield = 0
@@ -23,8 +30,10 @@ export default class SwarmFS extends HttpFS {
     debug(`SwarmFS::open`, { filename })
     if (this.openFiles.has(filename)) return
 
-    const { rootHash, blockCount, proofDepth } =
+    const { rootHash, blockCount, proofDepth, fileSize } =
       await this.getRootFileInfo(filename)
+    this.fileSizes.set(filename, fileSize)
+
     const merkleTree = new MerkleTree(blockCount, rootHash)
     const connection = new Connection(
       filename,
@@ -42,11 +51,7 @@ export default class SwarmFS extends HttpFS {
     return file
   }
 
-  private async getRootFileInfo(filename: string): Promise<{
-    rootHash: Uint8Array
-    blockCount: number
-    proofDepth: number
-  }> {
+  private async getRootFileInfo(filename: string): Promise<RootFileInfo> {
     const infoUrl = filename + ".info.json"
     debug(`Fetching root info from ${infoUrl}`)
     const response = await fetch(infoUrl)
@@ -54,10 +59,15 @@ export default class SwarmFS extends HttpFS {
       throw new Error(`Failed to fetch root info: ${response.statusText}`)
     }
     const info = await response.json()
+    if (!Number.isSafeInteger(info.fileSize) || info.fileSize < 0) {
+      throw new Error(`Invalid file size metadata in ${infoUrl}`)
+    }
+
     return {
       rootHash: Uint8Array.fromHex(info.rootHash),
       blockCount: info.blockCount,
       proofDepth: info.proofDepth,
+      fileSize: info.fileSize,
     }
   }
 
