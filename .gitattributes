@@ -1,0 +1,2 @@
+public/books.sqlite filter=lfs diff=lfs merge=lfs -text
+public/books.sqlite.proof filter=lfs diff=lfs merge=lfs -text

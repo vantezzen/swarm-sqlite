@@ -22,6 +22,9 @@
 .DS_Store
 *.pem
 public/*.sqlite*
+!public/books.sqlite
+!public/books.sqlite.proof
+!public/books.sqlite.info.json
 
 # debug
 npm-debug.log*
